@@ -1,0 +1,76 @@
+# Project Build Instructions for AI
+
+## Project Overview
+- **Name:** chatBotDrinkRecommendation
+- **Purpose:** Provides personalized drink recommendations based on user preferences and the shop's menu.
+- **Target users:** Individuals looking for drink suggestions, bartenders, and beverage enthusiasts.
+
+## Tech Stack
+- **Language/Framework:** Python 3.12 + FastAPI + Langchain + Ollama
+- **LLM Model:** llama3.1 via Ollama (model name must be configurable via environment variable)
+- **Database:** PostgreSQL
+- **Frontend:** React + Tailwind CSS
+- **Containerization:** Docker + docker-compose
+
+## Features (in priority order)
+
+### 1. User Onboarding (first visit)
+- On first access, user registers with **phone number, name, and address** (phone number is the unique identifier)
+- **Login (MVP):** entering an existing phone number logs the user in and returns a session token (JWT); no password or OTP for MVP
+- After registration, the chatbot asks a short **onboarding questionnaire** in a conversational style:
+  - Taste preferences (e.g., sweet, bitter, sour, creamy)
+  - Drink type preferences (e.g., coffee, tea, smoothies, soda)
+  - Temperature preference (hot / iced / either)
+  - Caffeine tolerance (e.g., no caffeine, low, any)
+  - **Allergies and dietary restrictions** (e.g., dairy, nuts, gluten)
+- The AI (Langchain + Ollama) extracts structured preference data from the user's free-text answers and saves it to the database as the user's profile
+
+### 2. Chat-based Drink Recommendation
+- User chats with the AI in natural language (e.g., "I want something refreshing and not too sweet")
+- The AI recommends drinks **only from the shop's menu**, filtered by:
+  - The user's saved preferences
+  - The user's allergies (**never recommend a drink containing an allergen**)
+  - The current conversation context (e.g., mood, weather, occasion mentioned in chat)
+- Each recommendation includes the drink name, short description, price, and why it was chosen
+- User can ask follow-up questions ("something cheaper?", "make it iced?") and get refined suggestions
+- Chat history is stored per user in the database
+
+### 3. User Profile Management
+- Returning users (identified by phone number) skip onboarding and go straight to chat
+- User can update preferences and allergies at any time via chat (e.g., "I'm allergic to peanuts now") — the AI detects the change and updates the database
+- User can save favorite drinks and view chat history
+
+### 4. Menu Management
+- Shop menu stored in the database: drink name, description, ingredients, price, category, availability
+- Simple admin API endpoints (CRUD) to add/update/remove menu items
+- AI recommendations always reflect the current available menu
+- **Seed the database with ~15 sample drinks** (5 cafe, 5 tea, 5 fruit juice) (varied categories, ingredients, and prices) for development and testing
+
+## Architecture / API
+- REST API built with FastAPI; auto-generated OpenAPI docs at `/docs`
+- Chat endpoint should stream responses if practical; otherwise return complete responses
+- Backend, frontend, PostgreSQL, and Ollama each run as services in `docker-compose`
+
+## Project Structure
+- Follow standard conventions for FastAPI (backend) and React (frontend), in separate directories (e.g., `backend/`, `frontend/`)
+- Include a `README.md` with setup and run instructions
+- Include a `.gitignore` appropriate for Python and Node.js
+- Include a `DEPLOYMENT.md` outlining an approach for scalable AWS deployment (e.g., ECS for API/frontend, RDS for PostgreSQL, GPU instance or managed alternative for the LLM)
+
+## Requirements
+- Write unit tests for core logic (recommendation filtering, allergen exclusion, preference extraction, auth)
+- Use environment variables for secrets/config (provide `.env.example`)
+- Add error handling and input validation (e.g., phone number format validation)
+- Keep functions small and code well-commented
+
+## Acceptance Criteria
+- [ ] Project runs locally with documented setup steps
+- [ ] Entire stack starts with `docker-compose up` (API, frontend, PostgreSQL, Ollama)
+- [ ] User can register and log in using phone number (JWT session)
+- [ ] First-time users complete conversational onboarding; preferences and allergies are saved to the database
+- [ ] Returning users skip onboarding and go straight to chat
+- [ ] User receives personalized drink recommendations based on their preferences and the available menu
+- [ ] **AI never recommends a drink containing the user's declared allergens**
+- [ ] Database is seeded with sample menu data
+- [ ] All unit tests pass
+- [ ] `DEPLOYMENT.md` outlines an AWS deployment approach
