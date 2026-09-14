@@ -1,6 +1,7 @@
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from langchain_core.messages import AIMessage
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -10,11 +11,43 @@ from app.models import MenuItem
 from app.services import llm
 
 
+class FakeToolModel:
+    """Test double for a tool-calling chat model: replays scripted AIMessage responses in order."""
+
+    def __init__(self, responses: list[AIMessage] | None = None):
+        self._responses = list(responses or [])
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        if not self._responses:
+            return AIMessage(content="OK")
+        return self._responses.pop(0)
+
+
+def ai_text(text: str) -> AIMessage:
+    """A final assistant reply with no tool calls."""
+    return AIMessage(content=text)
+
+
+def ai_tool_call(name: str, args: dict, call_id: str = "call_1") -> AIMessage:
+    """An assistant turn that calls a single tool."""
+    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}])
+
+
+def stub_agent_model(monkeypatch, responses: list[AIMessage]) -> FakeToolModel:
+    """Patch the chat agent's underlying model with a scripted FakeToolModel."""
+    fake = FakeToolModel(responses)
+    monkeypatch.setattr(llm, "get_chat_model", lambda: fake)
+    return fake
+
+
 @pytest.fixture(autouse=True)
 def no_llm(monkeypatch):
-    """Tests never hit Ollama: force deterministic fallback paths."""
-    monkeypatch.setattr(llm, "invoke_llm", lambda prompt: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
-    monkeypatch.setattr(llm, "extract_list", lambda question, answer: None)
+    """Tests never hit a real LLM: default to a no-op fake chat model."""
+    monkeypatch.setattr(llm, "get_chat_model", lambda: FakeToolModel())
+
 
 
 @pytest_asyncio.fixture
@@ -74,13 +107,3 @@ async def register_user(client, phone="+14155550100", name="Alice", address="1 M
 
 def auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def complete_onboarding(client, token, allergies="dairy"):
-    """Answer all 5 onboarding questions; returns the last response."""
-    answers = ["sweet, creamy", "coffee and juice", "iced", "any is fine", allergies]
-    resp = None
-    for answer in answers:
-        resp = await client.post("/api/chat", json={"message": answer}, headers=auth_headers(token))
-        assert resp.status_code == 200, resp.text
-    return resp

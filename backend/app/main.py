@@ -6,7 +6,7 @@ from app.routers import auth, chat, menu, users
 
 app = FastAPI(
     title="chatBotDrinkRecommendation",
-    description="Personalized drink recommendations powered by Langchain + Ollama.",
+    description="Personalized drink recommendations powered by Langchain + OpenAI.",
     version="1.0.0",
 )
 

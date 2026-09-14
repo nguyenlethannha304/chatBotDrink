@@ -1,0 +1,292 @@
+"""Chat agent: a tool-calling loop that lets the LLM invoke 3 backend functions
+(update_profile, recommend_drink, order) instead of following a fixed script.
+
+Business-rule safety (allergen exclusion, exact-name validation) is enforced in
+the tool executors below, in code — never trusted to the model's own judgment.
+"""
+import json
+from dataclasses import dataclass, field
+
+from anyio import to_thread
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import MenuItem, Order, OrderItem, User, UserPreference
+from app.services import llm, recommendation
+
+MAX_TOOL_ITERATIONS = 4
+
+TOOL_UPDATE_PROFILE = "update_profile"
+TOOL_RECOMMEND_DRINK = "recommend_drink"
+TOOL_ORDER = "order"
+
+FALLBACK_ERROR_REPLY = "Sorry, I'm having trouble connecting right now — please try again shortly."
+FALLBACK_LOOP_REPLY = "Sorry, I got a bit stuck there — could you rephrase what you'd like?"
+FALLBACK_EMPTY_REPLY = "Could you tell me a bit more about what you're looking for?"
+
+WELCOME_MESSAGE = (
+    "Welcome, {name}! I'm your drink assistant \u2014 tell me what flavors, drink types, "
+    "temperature and caffeine level you enjoy (and any allergies), or just ask me for a "
+    "recommendation whenever you're ready."
+)
+
+_TEMPERATURE_VALUES = {"hot", "iced", "either"}
+_CAFFEINE_VALUES = {"none", "low", "any"}
+_LIST_FIELDS = ("tastes", "drink_types", "allergies", "dietary_restrictions")
+
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_UPDATE_PROFILE,
+            "description": (
+                "Save a new or changed customer preference: taste, drink type, temperature, "
+                "caffeine tolerance, allergy, or dietary restriction. Call this whenever the "
+                "customer states such information, including the first time they mention it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tastes": {"type": "array", "items": {"type": "string"}},
+                    "drink_types": {"type": "array", "items": {"type": "string"}},
+                    "temperature": {"type": "string", "enum": sorted(_TEMPERATURE_VALUES)},
+                    "caffeine": {"type": "string", "enum": sorted(_CAFFEINE_VALUES)},
+                    "allergies": {"type": "array", "items": {"type": "string"}},
+                    "dietary_restrictions": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_RECOMMEND_DRINK,
+            "description": (
+                "Fetch the shop's current menu, already filtered to drinks that are available "
+                "and free of the customer's declared allergens. Call this before recommending "
+                "any specific drink \u2014 never invent a drink name, price, or ingredient."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What the customer is looking for (taste, mood, occasion, etc.)",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_ORDER,
+            "description": (
+                "Place an order for one or more drinks. Only call this after the customer has "
+                "explicitly confirmed which exact menu drink(s) and quantities they want."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Exact menu item name"},
+                                "quantity": {"type": "integer", "minimum": 1},
+                            },
+                            "required": ["name", "quantity"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+SYSTEM_PROMPT_TEMPLATE = """You are a friendly drink shop assistant chatting with {name}.
+
+Current known profile (may be incomplete):
+{profile_json}
+
+You have three tools: update_profile, recommend_drink, and order (see their descriptions).
+
+Rules:
+- If tastes, drink types, temperature, caffeine, or allergy info is missing, naturally ask about
+  it in conversation (a question or two at a time) instead of reciting a rigid checklist.
+- Never recommend or order a drink that contains one of the customer's declared allergens.
+- Only reference drinks by the exact names returned by recommend_drink.
+- Reply in the same language the customer writes in, and keep replies short and conversational.
+"""
+
+
+@dataclass
+class AgentResult:
+    reply: str
+    recommendations: list[dict] = field(default_factory=list)
+    order: dict | None = None
+
+
+def _build_messages(user: User, prefs: UserPreference, history: list[tuple[str, str]], message: str) -> list:
+    system = SystemMessage(
+        content=SYSTEM_PROMPT_TEMPLATE.format(
+            name=user.name, profile_json=json.dumps(recommendation.profile_dict(prefs))
+        )
+    )
+    messages: list = [system]
+    for role, content in history:
+        messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
+    messages.append(HumanMessage(content=message))
+    return messages
+
+
+def _exec_update_profile(prefs: UserPreference, args: dict) -> dict:
+    applied = {}
+    for field_name in _LIST_FIELDS:
+        value = args.get(field_name)
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            cleaned = [v.strip().lower() for v in value if v.strip()]
+            setattr(prefs, field_name, cleaned)
+            applied[field_name] = cleaned
+    temperature = args.get("temperature")
+    if temperature in _TEMPERATURE_VALUES:
+        prefs.temperature = temperature
+        applied["temperature"] = temperature
+    caffeine = args.get("caffeine")
+    if caffeine in _CAFFEINE_VALUES:
+        prefs.caffeine = caffeine
+        applied["caffeine"] = caffeine
+    return {"updated": applied}
+
+
+async def _exec_recommend_drink(db: AsyncSession, prefs: UserPreference) -> tuple[dict, list[dict]]:
+    items = list(await db.scalars(select(MenuItem)))
+    candidates = recommendation.filter_candidates(items, prefs.allergies or [])
+    if not candidates:
+        return (
+            {"candidates": [], "note": "No drinks on the current menu are safe for this customer's allergies."},
+            [],
+        )
+    tool_result = {
+        "candidates": [
+            {
+                "name": c.name,
+                "description": c.description,
+                "ingredients": c.ingredients or [],
+                "price": float(c.price),
+                "category": c.category,
+            }
+            for c in candidates
+        ]
+    }
+    recommendations = recommendation.fallback_recommend(candidates, prefs, limit=3)
+    return tool_result, recommendations
+
+
+async def _exec_order(db: AsyncSession, user: User, prefs: UserPreference, args: dict) -> tuple[dict, dict | None]:
+    requested = args.get("items")
+    if not isinstance(requested, list) or not requested:
+        return {"success": False, "message": "No items specified."}, None
+
+    items = list(await db.scalars(select(MenuItem).where(MenuItem.available.is_(True))))
+    by_name = {item.name.lower(): item for item in items}
+    allergies = prefs.allergies or []
+
+    accepted: list[tuple[MenuItem, int]] = []
+    rejected: list[dict] = []
+    for entry in requested:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        quantity = entry.get("quantity")
+        if not isinstance(quantity, int) or quantity < 1:
+            rejected.append({"name": name, "reason": "invalid quantity"})
+            continue
+        item = by_name.get(name.lower())
+        if item is None:
+            rejected.append({"name": name, "reason": "not found on the available menu"})
+            continue
+        if recommendation.contains_allergen(item.ingredients or [], allergies):
+            rejected.append({"name": item.name, "reason": "contains a declared allergen"})
+            continue
+        accepted.append((item, quantity))
+
+    if not accepted:
+        return {"success": False, "rejected": rejected, "message": "No valid items could be ordered."}, None
+
+    total_price = sum(float(item.price) * qty for item, qty in accepted)
+    order = Order(user_id=user.id, status="placed", total_price=total_price)
+    db.add(order)
+    await db.flush()
+    for item, qty in accepted:
+        db.add(OrderItem(order_id=order.id, menu_item_id=item.id, quantity=qty, unit_price=item.price))
+    await db.flush()
+
+    order_dict = {
+        "id": order.id,
+        "status": order.status,
+        "total_price": float(order.total_price),
+        "items": [{"name": item.name, "quantity": qty, "unit_price": float(item.price)} for item, qty in accepted],
+    }
+    tool_result = {"success": True, "order": order_dict, "rejected": rejected}
+    return tool_result, order_dict
+
+
+async def _dispatch(db: AsyncSession, user: User, prefs: UserPreference, call: dict) -> tuple[dict, list[dict] | dict | None]:
+    name = call.get("name")
+    args = call.get("args") or {}
+    if name == TOOL_UPDATE_PROFILE:
+        return _exec_update_profile(prefs, args), None
+    if name == TOOL_RECOMMEND_DRINK:
+        result, recommendations = await _exec_recommend_drink(db, prefs)
+        return result, recommendations
+    if name == TOOL_ORDER:
+        result, order = await _exec_order(db, user, prefs, args)
+        return result, order
+    return {"error": f"unknown tool '{name}'"}, None
+
+
+async def run_chat_turn(
+    db: AsyncSession,
+    user: User,
+    prefs: UserPreference,
+    history: list[tuple[str, str]],
+    message: str,
+) -> AgentResult:
+    """Run one turn of the tool-calling agent loop and return the final reply plus any
+    structured recommendations/order produced along the way."""
+    model = llm.get_chat_model().bind_tools(TOOL_SCHEMAS)
+    messages = _build_messages(user, prefs, history, message)
+    recommendations: list[dict] = []
+    order: dict | None = None
+
+    for _ in range(MAX_TOOL_ITERATIONS):
+        try:
+            ai_msg = await to_thread.run_sync(model.invoke, messages)
+        except Exception as exc:
+            print("Error invoking model:", exc)
+            return AgentResult(FALLBACK_ERROR_REPLY, recommendations, order)
+
+        messages.append(ai_msg)
+        tool_calls = getattr(ai_msg, "tool_calls", None) or []
+        if not tool_calls:
+            reply = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
+            return AgentResult(reply or FALLBACK_EMPTY_REPLY, recommendations, order)
+
+        for call in tool_calls:
+            result, extra = await _dispatch(db, user, prefs, call)
+            if call.get("name") == TOOL_RECOMMEND_DRINK and isinstance(extra, list):
+                recommendations = extra
+            elif call.get("name") == TOOL_ORDER and extra is not None:
+                order = extra
+            messages.append(ToolMessage(content=json.dumps(result, default=str), tool_call_id=call.get("id")))
+
+    return AgentResult(FALLBACK_LOOP_REPLY, recommendations, order)

@@ -7,7 +7,6 @@ async def test_register_returns_token(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["phone"] == "+14155550100"
-    assert body["onboarding_completed"] is False
 
 
 async def test_register_duplicate_phone_rejected(client):

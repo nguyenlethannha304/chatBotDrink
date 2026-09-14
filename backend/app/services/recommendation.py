@@ -1,14 +1,10 @@
 """Drink recommendation logic.
 
 Allergen safety is enforced HERE, in code: drinks containing a user's allergens
-are removed from the candidate list before the LLM ever sees the menu, so the
-model cannot recommend them. LLM output is additionally validated against the
-candidate list to reject hallucinated drinks.
+are removed from the candidate list before the chat agent ever sees the menu, so
+the model cannot recommend or order them.
 """
-import json
-
 from app.models import MenuItem, UserPreference
-from app.services import llm
 
 # Maps a declared allergy/restriction to ingredient keywords it covers.
 ALLERGEN_SYNONYMS: dict[str, list[str]] = {
@@ -84,7 +80,7 @@ def _score(item: MenuItem, prefs: UserPreference | None) -> int:
 
 
 def fallback_recommend(candidates: list[MenuItem], prefs: UserPreference | None, limit: int = 3) -> list[dict]:
-    """Deterministic recommendation used when the LLM is unavailable or returns garbage."""
+    """Deterministic recommendation ranking used to populate structured recommendation cards."""
     ranked = sorted(candidates, key=lambda i: _score(i, prefs), reverse=True)[:limit]
     return [
         {
@@ -97,30 +93,8 @@ def fallback_recommend(candidates: list[MenuItem], prefs: UserPreference | None,
     ]
 
 
-RECOMMEND_PROMPT = """You are a friendly drink shop assistant. Recommend drinks ONLY from this menu
-(it has already been filtered for the customer's allergies — every item below is safe):
-
-{menu}
-
-Customer profile: {profile}
-
-Recent conversation:
-{history}
-
-Customer's latest message: "{message}"
-
-Rules:
-- Recommend 1-3 drinks, ONLY using exact "name" values from the menu above.
-- Consider the customer's tastes, drink type, temperature and caffeine preferences,
-  plus any mood/weather/occasion in the conversation.
-- Reply in the same language the customer writes in.
-
-Return ONLY a JSON object in this exact format:
-{{"reply": "<short friendly reply text>", "recommendations": [{{"name": "<exact menu name>", "reason": "<why this fits>"}}]}}
-"""
-
-
-def _profile_dict(prefs: UserPreference | None) -> dict:
+def profile_dict(prefs: UserPreference | None) -> dict:
+    """Serialize a user's preferences for use in LLM prompts."""
     if prefs is None:
         return {}
     return {
@@ -131,71 +105,3 @@ def _profile_dict(prefs: UserPreference | None) -> dict:
         "allergies": prefs.allergies or [],
         "dietary_restrictions": prefs.dietary_restrictions or [],
     }
-
-
-def recommend(
-    message: str,
-    candidates: list[MenuItem],
-    prefs: UserPreference | None,
-    history: list[tuple[str, str]],
-) -> tuple[str, list[dict]]:
-    """Return (reply_text, recommendations). Falls back to deterministic ranking on LLM failure."""
-    if not candidates:
-        return (
-            "I'm sorry — no drinks on our current menu are safe for your allergies. "
-            "Please check back soon!",
-            [],
-        )
-
-    menu_json = json.dumps(
-        [
-            {
-                "name": c.name,
-                "description": c.description,
-                "ingredients": c.ingredients or [],
-                "price": float(c.price),
-                "category": c.category,
-            }
-            for c in candidates
-        ]
-    )
-    history_text = "\n".join(f"{role}: {content}" for role, content in history[-10:]) or "(none)"
-
-    try:
-        raw = llm.invoke_llm(
-            RECOMMEND_PROMPT.format(
-                menu=menu_json,
-                profile=json.dumps(_profile_dict(prefs)),
-                history=history_text,
-                message=message,
-            )
-        )
-        parsed = llm.parse_json_block(raw)
-    except Exception:
-        parsed = None
-
-    if not isinstance(parsed, dict) or "reply" not in parsed:
-        recs = fallback_recommend(candidates, prefs)
-        return ("Here are some drinks I think you'll enjoy:", recs)
-
-    # Validate LLM picks against the safe candidate list; drop hallucinated names.
-    by_name = {c.name.lower(): c for c in candidates}
-    recs: list[dict] = []
-    for pick in parsed.get("recommendations", []):
-        if not isinstance(pick, dict):
-            continue
-        item = by_name.get(str(pick.get("name", "")).strip().lower())
-        if item is None:
-            continue
-        recs.append(
-            {
-                "name": item.name,
-                "description": item.description,
-                "price": float(item.price),
-                "reason": str(pick.get("reason", "A great match for you.")),
-            }
-        )
-
-    if not recs:
-        recs = fallback_recommend(candidates, prefs)
-    return (str(parsed["reply"]), recs)

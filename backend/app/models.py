@@ -24,9 +24,6 @@ class User(Base):
     phone: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     address: Mapped[str] = mapped_column(String(255), nullable=False)
-    onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # index of the next onboarding question to answer
-    onboarding_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     preferences: Mapped["UserPreference | None"] = relationship(
@@ -36,6 +33,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     favorites: Mapped[list["Favorite"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    orders: Mapped[list["Order"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -88,4 +88,30 @@ class Favorite(Base):
     menu_item_id: Mapped[int] = mapped_column(ForeignKey("menu_items.id"), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="favorites")
+    menu_item: Mapped[MenuItem] = relationship()
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="placed", nullable=False)
+    total_price: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped[User] = relationship(back_populates="orders")
+    items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
+
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    menu_item_id: Mapped[int] = mapped_column(ForeignKey("menu_items.id"), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)  # price snapshot at order time
+
+    order: Mapped[Order] = relationship(back_populates="items")
     menu_item: Mapped[MenuItem] = relationship()

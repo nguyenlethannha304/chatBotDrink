@@ -15,30 +15,12 @@ services:
       timeout: 5s
       retries: 10
 
-  # Only needed when LLM_PROVIDER=ollama; start with: docker compose --profile ollama up
-  ollama:
-    image: ollama/ollama:latest
-    profiles: ["ollama"]
-    volumes:
-      - ollama_models:/root/.ollama
-    ports:
-      - "11434:11434"
-    # Start the server, then pull the configured model on first boot
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        sleep 5
-        ollama pull "${OLLAMA_MODEL:-llama3.1}"
-        wait
-
   backend:
     build: ./backend
     env_file:
       - .env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://drinkbot:change-me@postgres:5432/drinkbot}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
     ports:
       - "8000:8000"
     depends_on:
@@ -58,4 +40,3 @@ services:
 
 volumes:
   pgdata:
-  ollama_models:

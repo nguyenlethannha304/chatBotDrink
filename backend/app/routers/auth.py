@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import ChatMessage, User, UserPreference
 from app.schemas import LoginRequest, RegisterRequest, TokenResponse
-from app.services import onboarding
+from app.services.agent import WELCOME_MESSAGE
 from app.services.auth import create_access_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -23,14 +23,11 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     )
     db.add(user)
     await db.flush()
-    # Seed the chat with the onboarding greeting so the first question is in history
-    db.add(ChatMessage(user_id=user.id, role="assistant", content=onboarding.first_message(user.name)))
+    # Seed the chat with a greeting so the assistant's first message is in history
+    db.add(ChatMessage(user_id=user.id, role="assistant", content=WELCOME_MESSAGE.format(name=user.name)))
     await db.commit()
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.phone),
-        onboarding_completed=False,
-    )
+    return TokenResponse(access_token=create_access_token(user.id, user.phone))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -38,7 +35,4 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     user = await db.scalar(select(User).where(User.phone == payload.phone))
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Phone number not registered")
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.phone),
-        onboarding_completed=user.onboarding_completed,
-    )
+    return TokenResponse(access_token=create_access_token(user.id, user.phone))

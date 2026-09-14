@@ -38,7 +38,6 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    onboarding_completed: bool
 
 
 # --- Users / preferences ---
@@ -70,7 +69,6 @@ class UserOut(BaseModel):
     phone: str
     name: str
     address: str
-    onboarding_completed: bool
 
 
 # --- Menu ---
@@ -116,10 +114,23 @@ class Recommendation(BaseModel):
     reason: str
 
 
+class OrderItemOut(BaseModel):
+    name: str
+    quantity: int
+    unit_price: float
+
+
+class OrderOut(BaseModel):
+    id: int
+    status: str
+    total_price: float
+    items: list[OrderItemOut]
+
+
 class ChatResponse(BaseModel):
     reply: str
     recommendations: list[Recommendation] = []
-    onboarding: bool = False
+    order: OrderOut | None = None
 
 
 class ChatMessageOut(BaseModel):
