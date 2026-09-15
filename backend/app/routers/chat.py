@@ -43,7 +43,16 @@ async def chat(
 
     result = await agent.run_chat_turn(db, user, prefs, history, payload.message)
 
-    db.add(ChatMessage(user_id=user.id, role="assistant", content=result.reply))
+    db.add(ChatMessage(
+        user_id=user.id,
+        role="assistant",
+        content=result.reply,
+        model_name=result.model_name,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        total_tokens=result.total_tokens,
+        estimated_cost_usd=result.estimated_cost_usd,
+    ))
     await db.commit()
     return ChatResponse(
         reply=result.reply,

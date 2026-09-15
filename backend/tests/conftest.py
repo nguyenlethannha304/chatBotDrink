@@ -26,14 +26,29 @@ class FakeToolModel:
         return self._responses.pop(0)
 
 
-def ai_text(text: str) -> AIMessage:
+def ai_text(text: str, input_tokens: int | None = None, output_tokens: int | None = None) -> AIMessage:
     """A final assistant reply with no tool calls."""
-    return AIMessage(content=text)
+    return AIMessage(content=text, response_metadata=_usage_metadata(input_tokens, output_tokens))
 
 
-def ai_tool_call(name: str, args: dict, call_id: str = "call_1") -> AIMessage:
+def ai_tool_call(name: str, args: dict, call_id: str = "call_1",
+                 input_tokens: int | None = None, output_tokens: int | None = None) -> AIMessage:
     """An assistant turn that calls a single tool."""
-    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}])
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
+        response_metadata=_usage_metadata(input_tokens, output_tokens),
+    )
+
+
+def _usage_metadata(input_tokens: int | None, output_tokens: int | None) -> dict:
+    if input_tokens is None or output_tokens is None:
+        return {}
+    return {"token_usage": {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }}
 
 
 def stub_agent_model(monkeypatch, responses: list[AIMessage]) -> FakeToolModel:

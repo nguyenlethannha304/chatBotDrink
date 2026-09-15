@@ -3,6 +3,7 @@ import logging
 
 from langchain_core.messages import AIMessage
 
+from app.config import settings
 from app.services import llm
 
 
@@ -31,4 +32,12 @@ def test_invoke_logs_versioned_usage_and_cost(caplog):
     assert event["prompt_version"] == "1.0.0"
     assert event["input_tokens"] == 100
     assert event["output_tokens"] == 25
-    assert event["estimated_cost_usd"] == 0.00003
+    assert result.usage.input_tokens == 100
+    assert result.usage.output_tokens == 25
+    expected_cost = round(
+        (100 / 1_000_000) * settings.llm_input_cost_per_million
+        + (25 / 1_000_000) * settings.llm_output_cost_per_million,
+        8,
+    )
+    assert event["estimated_cost_usd"] == expected_cost
+    assert result.usage.estimated_cost_usd == expected_cost

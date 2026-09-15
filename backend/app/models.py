@@ -75,6 +75,11 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(10), nullable=False)  # user | assistant
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 8), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="messages")
 

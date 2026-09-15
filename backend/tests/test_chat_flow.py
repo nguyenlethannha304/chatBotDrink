@@ -1,3 +1,6 @@
+from sqlalchemy import select
+
+from app.models import ChatMessage
 from tests.conftest import ai_text, ai_tool_call, auth_headers, register_user, stub_agent_model
 
 
@@ -20,6 +23,41 @@ async def test_chat_reply_with_no_tool_calls(client, monkeypatch):
     assert body["reply"] == "Hi there! What flavors do you enjoy?"
     assert body["recommendations"] == []
     assert body["order"] is None
+
+
+async def test_chat_persists_model_usage_on_assistant_message(client, db_session, monkeypatch):
+    token = await register_user(client)
+    stub_agent_model(monkeypatch, [ai_text("Hi there!", input_tokens=100, output_tokens=25)])
+
+    resp = await client.post("/api/chat", json={"message": "hello"}, headers=auth_headers(token))
+    assert resp.status_code == 200
+
+    messages = list(await db_session.scalars(select(ChatMessage).order_by(ChatMessage.id)))
+    assert messages[0].input_tokens is None
+    assert messages[1].role == "user"
+    assert messages[1].input_tokens is None
+    assert messages[2].role == "assistant"
+    assert messages[2].model_name == "gpt-4o-mini"
+    assert messages[2].input_tokens == 100
+    assert messages[2].output_tokens == 25
+    assert messages[2].total_tokens == 125
+
+
+async def test_chat_aggregates_usage_across_tool_calls(client, db_session, seeded_menu, monkeypatch):
+    token = await register_user(client)
+    stub_agent_model(monkeypatch, [
+        ai_tool_call("recommend_drink", {"query": "refreshing"}, input_tokens=100, output_tokens=20),
+        ai_text("Try an Iced Americano.", input_tokens=200, output_tokens=30),
+    ])
+
+    resp = await client.post("/api/chat", json={"message": "something refreshing"}, headers=auth_headers(token))
+    assert resp.status_code == 200
+
+    messages = list(await db_session.scalars(select(ChatMessage).order_by(ChatMessage.id)))
+    assistant = messages[-1]
+    assert assistant.input_tokens == 300
+    assert assistant.output_tokens == 50
+    assert assistant.total_tokens == 350
 
 
 async def test_update_profile_via_chat(client, monkeypatch):

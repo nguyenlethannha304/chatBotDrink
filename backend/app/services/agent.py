@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import MenuItem, Order, OrderItem, User, UserPreference
 from app.llm_versions import SYSTEM_PROMPT_TEMPLATE
 from app.services import llm, recommendation
@@ -118,6 +119,11 @@ class AgentResult:
     reply: str
     recommendations: list[dict] = field(default_factory=list)
     order: dict | None = None
+    model_name: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
 
 
 def _build_messages(user: User, prefs: UserPreference, history: list[tuple[str, str]], message: str) -> list:
@@ -252,19 +258,52 @@ async def run_chat_turn(
     messages = _build_messages(user, prefs, history, message)
     recommendations: list[dict] = []
     order: dict | None = None
+    usage = llm.LLMUsage()
+
+    def result_with_usage(reply: str) -> AgentResult:
+        return AgentResult(
+            reply,
+            recommendations,
+            order,
+            settings.openai_model if any(value is not None for value in (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.total_tokens,
+                usage.estimated_cost_usd,
+            )) else None,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.estimated_cost_usd,
+        )
+
+    def add_usage(current: int | float | None, added: int | float | None):
+        if current is None:
+            return added
+        if added is None:
+            return current
+        return current + added
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
-            ai_msg = await to_thread.run_sync(llm.invoke, model, messages)
+            invocation = await to_thread.run_sync(llm.invoke, model, messages)
         except Exception as exc:
             print("Error invoking model:", exc)
-            return AgentResult(FALLBACK_ERROR_REPLY, recommendations, order)
+            return result_with_usage(FALLBACK_ERROR_REPLY)
+
+        ai_msg = invocation.response
+        usage = llm.LLMUsage(
+            input_tokens=add_usage(usage.input_tokens, invocation.usage.input_tokens),
+            output_tokens=add_usage(usage.output_tokens, invocation.usage.output_tokens),
+            total_tokens=add_usage(usage.total_tokens, invocation.usage.total_tokens),
+            estimated_cost_usd=add_usage(usage.estimated_cost_usd, invocation.usage.estimated_cost_usd),
+        )
 
         messages.append(ai_msg)
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
             reply = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
-            return AgentResult(reply or FALLBACK_EMPTY_REPLY, recommendations, order)
+            return result_with_usage(reply or FALLBACK_EMPTY_REPLY)
 
         for call in tool_calls:
             result, extra = await _dispatch(db, user, prefs, call)
@@ -274,4 +313,4 @@ async def run_chat_turn(
                 order = extra
             messages.append(ToolMessage(content=json.dumps(result, default=str), tool_call_id=call.get("id")))
 
-    return AgentResult(FALLBACK_LOOP_REPLY, recommendations, order)
+    return result_with_usage(FALLBACK_LOOP_REPLY)

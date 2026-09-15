@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     openai_model: str = "gpt-4o-mini"
     openai_base_url: str = "https://api.openai.com/v1"
-    llm_input_cost_per_million: float = 0.15
-    llm_output_cost_per_million: float = 0.60
+    llm_input_cost_per_million: float = 0.05
+    llm_output_cost_per_million: float = 0.40
 
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
     admin_api_key: str = ""  # empty = admin endpoints unprotected (MVP/dev)

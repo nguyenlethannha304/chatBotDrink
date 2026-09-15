@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from functools import lru_cache
 
 from langchain_openai import ChatOpenAI
@@ -11,6 +12,23 @@ from app.config import settings
 from app.llm_versions import current_version
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class LLMInvocation:
+    response: object
+    usage: LLMUsage
+
+    def __getattr__(self, name: str):
+        return getattr(self.response, name)
 
 @lru_cache
 def get_chat_model() -> ChatOpenAI:
@@ -69,4 +87,12 @@ def invoke(model, messages):
         "total_tokens": usage.get("total_tokens"),
         "estimated_cost_usd": estimated_cost,
     }))
-    return response
+    return LLMInvocation(
+        response=response,
+        usage=LLMUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=usage.get("total_tokens"),
+            estimated_cost_usd=estimated_cost,
+        ),
+    )
