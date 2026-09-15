@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import MenuItem, Order, OrderItem, User, UserPreference
+from app.llm_versions import SYSTEM_PROMPT_TEMPLATE
 from app.services import llm, recommendation
 
 MAX_TOOL_ITERATIONS = 4
@@ -111,22 +112,6 @@ TOOL_SCHEMAS = [
         },
     },
 ]
-
-SYSTEM_PROMPT_TEMPLATE = """You are a friendly drink shop assistant chatting with {name}.
-
-Current known profile (may be incomplete):
-{profile_json}
-
-You have three tools: update_profile, recommend_drink, and order (see their descriptions).
-
-Rules:
-- If tastes, drink types, temperature, caffeine, or allergy info is missing, naturally ask about
-  it in conversation (a question or two at a time) instead of reciting a rigid checklist.
-- Never recommend or order a drink that contains one of the customer's declared allergens.
-- Only reference drinks by the exact names returned by recommend_drink.
-- Reply in the same language the customer writes in, and keep replies short and conversational.
-"""
-
 
 @dataclass
 class AgentResult:
@@ -270,7 +255,7 @@ async def run_chat_turn(
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
-            ai_msg = await to_thread.run_sync(model.invoke, messages)
+            ai_msg = await to_thread.run_sync(llm.invoke, model, messages)
         except Exception as exc:
             print("Error invoking model:", exc)
             return AgentResult(FALLBACK_ERROR_REPLY, recommendations, order)

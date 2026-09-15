@@ -57,6 +57,27 @@ The app calls a hosted LLM API (OpenAI or Gemini) selected via `LLM_PROVIDER`:
 2. Run migration task (`alembic upgrade head`) against RDS.
 3. Update ECS service (rolling deploy); sync frontend `dist/` to S3 + CloudFront invalidation.
 
+## LLM operations
+
+The backend records a structured `llm_invocation` event for every model call. Events include the
+provider, model, prompt version and hash, latency, success/failure, token counts when supplied by
+the provider, and an estimated cost. Raw chat messages and user identifiers are not logged.
+
+The active prompt is versioned in `backend/app/llm_versions.py`; the health endpoint exposes its
+non-sensitive metadata so a deployed task can be matched to a prompt/model configuration.
+CloudWatch metric filters and alarms track failed and slow model calls. Token cost is retained in
+the structured log event for aggregation; the configured rates are estimates and must be updated
+when provider pricing changes.
+
+The repository's GitHub Actions workflow runs backend tests on pull requests and deploys immutable
+commit-SHA backend images after pushes to `main`. Configure `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`,
+`BACKEND_ECR_REPOSITORY`, `BACKEND_TASK_DEFINITION`, `BACKEND_ECS_SERVICE`, and
+`BACKEND_ECS_CLUSTER` as repository variables before enabling production deployment.
+
+The ECS backend service has a deployment circuit breaker with rollback enabled. A deployment is
+not considered complete until ECS reaches service stability. Add smoke tests and an evaluation gate
+for recommendation quality before treating a model or prompt change as production-ready.
+
 ## Cost-conscious starting point
 
 | Resource | Size | Approx. |

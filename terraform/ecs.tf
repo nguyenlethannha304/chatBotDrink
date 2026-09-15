@@ -115,6 +115,56 @@ resource "aws_cloudwatch_log_group" "frontend" {
   retention_in_days = 30
 }
 
+resource "aws_cloudwatch_log_metric_filter" "llm_errors" {
+  name           = "${var.project_name}-llm-errors"
+  log_group_name = aws_cloudwatch_log_group.backend.name
+  pattern        = "{ $.event = \"llm_invocation\" && $.success = false }"
+
+  metric_transformation {
+    name      = "LLMInvocationErrors"
+    namespace = "${var.project_name}/LLM"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "llm_slow_calls" {
+  name           = "${var.project_name}-llm-slow-calls"
+  log_group_name = aws_cloudwatch_log_group.backend.name
+  pattern        = "{ $.event = \"llm_invocation\" && $.latency_ms > 5000 }"
+
+  metric_transformation {
+    name      = "LLMSlowCalls"
+    namespace = "${var.project_name}/LLM"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "llm_errors" {
+  alarm_name          = "${var.project_name}-llm-errors"
+  alarm_description   = "LLM invocation failures exceed the deployment safety threshold"
+  namespace           = "${var.project_name}/LLM"
+  metric_name         = "LLMInvocationErrors"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 5
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+}
+
+resource "aws_cloudwatch_metric_alarm" "llm_slow_calls" {
+  alarm_name          = "${var.project_name}-llm-slow-calls"
+  alarm_description   = "LLM calls slower than five seconds exceed the threshold"
+  namespace           = "${var.project_name}/LLM"
+  metric_name         = "LLMSlowCalls"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 10
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+}
+
 # --- Backend service ---
 
 resource "aws_ecs_task_definition" "backend" {
@@ -145,6 +195,8 @@ resource "aws_ecs_task_definition" "backend" {
       # Both are set from llm_model; only the active provider's is read
       { name = "OPENAI_MODEL", value = var.llm_model },
       { name = "GEMINI_MODEL", value = var.llm_model },
+      { name = "LLM_INPUT_COST_PER_MILLION", value = "0.15" },
+      { name = "LLM_OUTPUT_COST_PER_MILLION", value = "0.60" },
       { name = "CORS_ORIGINS", value = "http://${aws_lb.main.dns_name}" },
     ]
 
@@ -185,6 +237,14 @@ resource "aws_ecs_service" "backend" {
 
   # LLM responses are slow; give tasks time to drain
   health_check_grace_period_seconds = 120
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   depends_on = [aws_lb_listener_rule.api]
 }

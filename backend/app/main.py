@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.llm_versions import current_version
 from app.routers import auth, chat, menu, users
 
 app = FastAPI(
@@ -27,4 +28,12 @@ app.include_router(users.router, prefix="/api")
 
 @app.get("/api/health", tags=["health"])
 async def health():
-    return {"status": "ok"}
+    version = current_version()
+    return {
+        "status": "ok",
+        "llm_provider": version.provider,
+        "llm_model": version.model,
+        "prompt_name": version.prompt_name,
+        "prompt_version": version.prompt_version,
+        "prompt_hash": version.prompt_hash,
+    }

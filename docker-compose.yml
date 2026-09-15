@@ -37,6 +37,13 @@ services:
       - "3000:80"
     depends_on:
       - backend
+  
+  adminer:
+    image: adminer:latest
+    ports:
+      - "7000:8080"
+    depends_on:
+      - postgres
 
 volumes:
   pgdata:
