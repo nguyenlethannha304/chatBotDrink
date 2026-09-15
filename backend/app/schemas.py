@@ -127,10 +127,15 @@ class OrderOut(BaseModel):
     items: list[OrderItemOut]
 
 
+class OrderConfirmationRequest(BaseModel):
+    confirmed: bool
+
+
 class ChatResponse(BaseModel):
     reply: str
     recommendations: list[Recommendation] = []
     order: OrderOut | None = None
+    pending_order: OrderOut | None = None
 
 
 class ChatMessageOut(BaseModel):

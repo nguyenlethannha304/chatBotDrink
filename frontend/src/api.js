@@ -42,6 +42,9 @@ export const api = {
   me: () => request('/users/me'),
   chat: (message) => request('/chat', { method: 'POST', body: { message } }),
   history: () => request('/chat/history'),
+  pendingOrders: () => request('/chat/orders/pending'),
+  confirmOrder: (id, confirmed) =>
+    request(`/chat/orders/${id}/confirm`, { method: 'POST', body: { confirmed } }),
   preferences: () => request('/users/me/preferences'),
   updatePreferences: (prefs) => request('/users/me/preferences', { method: 'PUT', body: prefs }),
   menu: () => request('/menu'),

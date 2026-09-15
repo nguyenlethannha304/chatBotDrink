@@ -1,4 +1,4 @@
-"""Chat agent: a tool-calling loop that lets the LLM invoke 3 backend functions
+"""Chat agent: a tool-calling loop that lets the LLM invoke backend functions
 (update_profile, recommend_drink, order) instead of following a fixed script.
 
 Business-rule safety (allergen exclusion, exact-name validation) is enforced in
@@ -88,8 +88,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": TOOL_ORDER,
             "description": (
-                "Place an order for one or more drinks. Only call this after the customer has "
-                "explicitly confirmed which exact menu drink(s) and quantities they want."
+                "Create a pending order preview for one or more drinks. Never claim the order "
+                "is placed: the customer must explicitly confirm it in the chat UI first."
             ),
             "parameters": {
                 "type": "object",
@@ -118,7 +118,7 @@ TOOL_SCHEMAS = [
 class AgentResult:
     reply: str
     recommendations: list[dict] = field(default_factory=list)
-    order: dict | None = None
+    pending_order: dict | None = None
     model_name: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -214,7 +214,7 @@ async def _exec_order(db: AsyncSession, user: User, prefs: UserPreference, args:
         return {"success": False, "rejected": rejected, "message": "No valid items could be ordered."}, None
 
     total_price = sum(float(item.price) * qty for item, qty in accepted)
-    order = Order(user_id=user.id, status="placed", total_price=total_price)
+    order = Order(user_id=user.id, status="pending", total_price=total_price)
     db.add(order)
     await db.flush()
     for item, qty in accepted:
@@ -227,7 +227,7 @@ async def _exec_order(db: AsyncSession, user: User, prefs: UserPreference, args:
         "total_price": float(order.total_price),
         "items": [{"name": item.name, "quantity": qty, "unit_price": float(item.price)} for item, qty in accepted],
     }
-    tool_result = {"success": True, "order": order_dict, "rejected": rejected}
+    tool_result = {"success": True, "pending_order": order_dict, "rejected": rejected}
     return tool_result, order_dict
 
 
@@ -253,18 +253,18 @@ async def run_chat_turn(
     message: str,
 ) -> AgentResult:
     """Run one turn of the tool-calling agent loop and return the final reply plus any
-    structured recommendations/order produced along the way."""
+    structured recommendations/pending order produced along the way."""
     model = llm.get_chat_model().bind_tools(TOOL_SCHEMAS)
     messages = _build_messages(user, prefs, history, message)
     recommendations: list[dict] = []
-    order: dict | None = None
+    pending_order: dict | None = None
     usage = llm.LLMUsage()
 
     def result_with_usage(reply: str) -> AgentResult:
         return AgentResult(
             reply,
             recommendations,
-            order,
+            pending_order,
             settings.openai_model if any(value is not None for value in (
                 usage.input_tokens,
                 usage.output_tokens,
@@ -310,7 +310,7 @@ async def run_chat_turn(
             if call.get("name") == TOOL_RECOMMEND_DRINK and isinstance(extra, list):
                 recommendations = extra
             elif call.get("name") == TOOL_ORDER and extra is not None:
-                order = extra
+                pending_order = extra
             messages.append(ToolMessage(content=json.dumps(result, default=str), tool_call_id=call.get("id")))
 
     return result_with_usage(FALLBACK_LOOP_REPLY)

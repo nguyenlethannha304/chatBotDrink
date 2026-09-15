@@ -29,7 +29,7 @@ def test_invoke_logs_versioned_usage_and_cost(caplog):
     event = json.loads(caplog.records[-1].message)
     assert event["event"] == "llm_invocation"
     assert event["success"] is True
-    assert event["prompt_version"] == "1.0.0"
+    assert event["prompt_version"] == "1.1.0"
     assert event["input_tokens"] == 100
     assert event["output_tokens"] == 25
     assert result.usage.input_tokens == 100

@@ -2,12 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, clearToken } from '../api'
 
+function money(value) {
+  return Number(value || 0).toFixed(2)
+}
+
 function RecommendationCard({ rec, onFavorite }) {
   return (
     <div className="bg-white border border-amber-200 rounded-xl p-3 mt-2 shadow-sm">
       <div className="flex justify-between items-start">
         <h3 className="font-semibold text-amber-800">{rec.name}</h3>
-        <span className="text-sm font-bold text-gray-700">${rec.price.toFixed(2)}</span>
+        <span className="text-sm font-bold text-gray-700">${money(rec.price)}</span>
       </div>
       <p className="text-sm text-gray-600">{rec.description}</p>
       <p className="text-xs text-amber-700 mt-1 italic">Why: {rec.reason}</p>
@@ -21,6 +25,49 @@ function RecommendationCard({ rec, onFavorite }) {
   )
 }
 
+function OrderCard({ order, busy, error, onDecision }) {
+  return (
+    <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 mt-3">
+      <div className="flex justify-between items-start">
+        <h3 className="font-semibold text-amber-900">Order #{order.id}</h3>
+        <span className="text-sm font-bold text-gray-700">${money(order.total_price)}</span>
+      </div>
+      <ul className="text-sm text-gray-700 mt-2 space-y-1">
+        {order.items.map((item) => (
+          <li key={`${order.id}-${item.name}`}>
+            {item.quantity} × {item.name} (${money(item.unit_price)} each)
+          </li>
+        ))}
+      </ul>
+      {order.status === 'pending' ? (
+        <div className="flex gap-2 mt-3">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(order.id, true)}
+            className="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold px-3 py-1.5 rounded-lg"
+          >
+            Xác nhận đơn
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision(order.id, false)}
+            className="border border-gray-300 hover:bg-white disabled:opacity-50 text-gray-700 text-sm px-3 py-1.5 rounded-lg"
+          >
+            Hủy đơn
+          </button>
+        </div>
+      ) : (
+        <p className="text-sm font-semibold text-amber-800 mt-3">
+          {order.status === 'placed' ? 'Đơn hàng đã được đặt.' : 'Đơn hàng đã được hủy.'}
+        </p>
+      )}
+      {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
+    </div>
+  )
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -30,12 +77,22 @@ export default function Chat() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    Promise.all([api.history(), api.menu()])
-      .then(([history, menuItems]) => {
-        setMessages(history.map((m) => ({ role: m.role, content: m.content })))
+    Promise.allSettled([api.history(), api.menu(), api.pendingOrders()])
+      .then(([historyResult, menuResult, pendingResult]) => {
+        const history = historyResult.status === 'fulfilled' ? historyResult.value : []
+        const menuItems = menuResult.status === 'fulfilled' ? menuResult.value : []
+        const pendingOrders = pendingResult.status === 'fulfilled' ? pendingResult.value : []
+        const restored = pendingOrders.map((order) => ({
+          role: 'assistant',
+          content: 'Please review your order and confirm it when ready.',
+          pendingOrder: order,
+        }))
+        setMessages([
+          ...history.map((m) => ({ role: m.role, content: m.content })),
+          ...restored,
+        ])
         setMenu(menuItems)
       })
-      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -53,10 +110,33 @@ export default function Chat() {
       const res = await api.chat(text)
       setMessages((m) => [
         ...m,
-        { role: 'assistant', content: res.reply, recommendations: res.recommendations },
+        {
+          role: 'assistant',
+          content: res.reply,
+          recommendations: res.recommendations,
+          pendingOrder: res.pending_order || (res.order?.status === 'pending' ? res.order : null),
+          orderError: null,
+        },
       ])
     } catch (err) {
       setMessages((m) => [...m, { role: 'assistant', content: `⚠️ ${err.message}` }])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function decideOrder(messageIndex, orderId, confirmed) {
+    if (busy) return
+    setBusy(true)
+    try {
+      const order = await api.confirmOrder(orderId, confirmed)
+      setMessages((current) => current.map((message, index) => (
+        index === messageIndex ? { ...message, pendingOrder: order, orderError: null } : message
+      )))
+    } catch (err) {
+      setMessages((current) => current.map((message, index) => (
+        index === messageIndex ? { ...message, orderError: err.message } : message
+      )))
     } finally {
       setBusy(false)
     }
@@ -101,6 +181,14 @@ export default function Chat() {
               {m.recommendations?.map((rec) => (
                 <RecommendationCard key={rec.name} rec={rec} onFavorite={favoriteByName} />
               ))}
+              {m.pendingOrder && (
+                <OrderCard
+                  order={m.pendingOrder}
+                  busy={busy}
+                  error={m.orderError}
+                  onDecision={(orderId, confirmed) => decideOrder(i, orderId, confirmed)}
+                />
+              )}
             </div>
           </div>
         ))}

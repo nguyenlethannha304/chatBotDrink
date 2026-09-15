@@ -1,6 +1,7 @@
 from sqlalchemy import select
 
-from app.models import ChatMessage
+from app.config import settings
+from app.models import ChatMessage, Order
 from tests.conftest import ai_text, ai_tool_call, auth_headers, register_user, stub_agent_model
 
 
@@ -37,7 +38,7 @@ async def test_chat_persists_model_usage_on_assistant_message(client, db_session
     assert messages[1].role == "user"
     assert messages[1].input_tokens is None
     assert messages[2].role == "assistant"
-    assert messages[2].model_name == "gpt-4o-mini"
+    assert messages[2].model_name == settings.openai_model
     assert messages[2].input_tokens == 100
     assert messages[2].output_tokens == 25
     assert messages[2].total_tokens == 125
@@ -99,21 +100,65 @@ async def test_recommend_drink_excludes_allergens(client, seeded_menu, monkeypat
     assert recs[0]["reason"]
 
 
-async def test_order_creates_order_and_confirms(client, seeded_menu, monkeypatch):
+async def test_order_creates_pending_order_until_user_confirms(client, db_session, seeded_menu, monkeypatch):
     token = await register_user(client)
     stub_agent_model(monkeypatch, [
         ai_tool_call("order", {"items": [{"name": "Iced Americano", "quantity": 2}]}),
-        ai_text("Your order is placed!"),
+        ai_text("Please review the order and confirm it."),
     ])
 
     resp = await client.post("/api/chat", json={"message": "order me 2 iced americanos"},
                              headers=auth_headers(token))
     assert resp.status_code == 200
-    order = resp.json()["order"]
+    order = resp.json()["pending_order"]
     assert order is not None
-    assert order["status"] == "placed"
+    assert order["status"] == "pending"
     assert order["total_price"] == 6.0
     assert order["items"] == [{"name": "Iced Americano", "quantity": 2, "unit_price": 3.0}]
+
+    stored = await db_session.scalar(select(Order).where(Order.id == order["id"]))
+    assert stored.status == "pending"
+
+    confirm = await client.post(f"/api/chat/orders/{order['id']}/confirm", json={"confirmed": True},
+                                headers=auth_headers(token))
+    assert confirm.status_code == 200
+    assert confirm.json()["status"] == "placed"
+
+
+async def test_order_can_be_cancelled_without_becoming_placed(client, db_session, seeded_menu, monkeypatch):
+    token = await register_user(client)
+    stub_agent_model(monkeypatch, [
+        ai_tool_call("order", {"items": [{"name": "Chamomile Honey Tea", "quantity": 1}]}),
+        ai_text("Please review the order."),
+    ])
+
+    response = await client.post("/api/chat", json={"message": "order me tea"}, headers=auth_headers(token))
+    order_id = response.json()["pending_order"]["id"]
+    cancel = await client.post(f"/api/chat/orders/{order_id}/confirm", json={"confirmed": False},
+                               headers=auth_headers(token))
+
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "cancelled"
+    stored = await db_session.scalar(select(Order).where(Order.id == order_id))
+    assert stored.status == "cancelled"
+
+
+async def test_confirm_revalidates_allergens(client, seeded_menu, monkeypatch):
+    token = await register_user(client)
+    stub_agent_model(monkeypatch, [
+        ai_tool_call("order", {"items": [{"name": "Iced Americano", "quantity": 1}]}),
+        ai_text("Please review the order."),
+    ])
+    response = await client.post("/api/chat", json={"message": "order an iced americano"},
+                                 headers=auth_headers(token))
+    order_id = response.json()["pending_order"]["id"]
+    await client.put("/api/users/me/preferences", json={"allergies": ["espresso"]},
+                     headers=auth_headers(token))
+
+    confirm = await client.post(f"/api/chat/orders/{order_id}/confirm", json={"confirmed": True},
+                                headers=auth_headers(token))
+    assert confirm.status_code == 409
+    assert "allergen" in confirm.json()["detail"]
 
 
 async def test_order_rejects_allergen_item(client, seeded_menu, monkeypatch):
